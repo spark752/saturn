@@ -1,33 +1,16 @@
-' Flipper physics, ball rolling and collision sounds, etc. taken from
-' the Big Deal table. This will normally not need to be modified and
-' is included by the table script at run time for development builds.
-'
-' Various global variables are accessed and created, so conflicts are
-' likely because VBScript
-'
-' Table Requirements:
-'   Table1 = The table (using its default name)
-'   RollingTimer = A 10ms timer which is set disabled in the editor.
-'       This is used to create the ball rolling sounds.
-'   LeftFlipper = The left flipper
-'   RightFlipper = The right flipper
-'   GameTimer = A 10ms timer which is set enabled in the editor.
-'       This rotates the flipper tops and gate tops to match the base parts.
-'
-' For correct collision sounds, items should be placed in a collection in
-' the editor based on their materials:
-'   aMetals, aMetalWires, aRubber_Bands, aRubber_Posts, aRubber_Pins,
-'   aPlastics, aGates, aWoods
-'
-' Call "SolLFlipper" and "SolRFlipper" when flipper keys are hit
+' General physics originally taken from the BigDeal table, but flippers have
+' been redone and a lot of other stuff removed.
 
 '****************************************
 ' Realtime updates
 '****************************************
-' A 10ms timer that rotates top parts to match the base parts
-Sub GameTimer_Timer
+' Call every 10ms to update misc physics
+Sub Physics_Tick
+    ' Make the visual flipper match the physics flipper
     VisLeftFlipper.RotZ = LeftFlipper.CurrentAngle
     VisRightFlipper.RotZ = RightFlipper.CurrentAngle
+
+    ' Calculate the ball velocities. Does anybody use this? FIXME
     Cor.Update
 End Sub
 
@@ -101,11 +84,10 @@ Sub InitRolling
     For i = 0 to tnob
         rolling(i) = False
     Next
-    RollingTimer.Enabled = 1
 End Sub
 
-' A 10ms timer to do ball rolling sounds which is enabled when needed
-Sub RollingTimer_Timer()
+' Call every 10 ms for rolling sounds
+Sub Rolling_Tick()
     Dim BOT, b, ballpitch, ballvol, speedfactorx, speedfactory
     BOT = GetBalls
 
@@ -154,24 +136,8 @@ Sub RollingTimer_Timer()
             If BOT(b).z <10 and BOT(b).z> -10 Then PlaySound "fx_hole_enter", 0, ABS(BOT(b).velz) / 17, Pan(BOT(b) ), 0, Pitch(BOT(b) ), 1, 0, AudioFade(BOT(b) )
         End If
 
-        ' jps ball speed & spin control
-        ' FIXME This is astonishingly bad code
-        'BOT(b).AngMomZ = BOT(b).AngMomZ * 0.95
-        'If BOT(b).VelX AND BOT(b).VelY <> 0 Then
-        '    speedfactorx = ABS(maxvel / BOT(b).VelX)
-        '    speedfactory = ABS(maxvel / BOT(b).VelY)
-        '    If speedfactorx <1 Then
-        '        BOT(b).VelX = BOT(b).VelX * speedfactorx
-        '        BOT(b).VelY = BOT(b).VelY * speedfactorx
-        '    End If
-        '    If speedfactory <1 Then
-        '        BOT(b).VelX = BOT(b).VelX * speedfactory
-        '        BOT(b).VelY = BOT(b).VelY * speedfactory
-        '    End If
-        '    If speedfactorx < 1 Or speedfactory < 1 Then
-        '        debug.print "Ball Speed Limited " + CStr(maxvel)
-        '    End If
-        'End If
+        ' Ball speed & spin control was here, but it shouldn't have been and
+        ' it wasn't good.
     Next
 End Sub
 
@@ -196,84 +162,44 @@ Sub aPlastics_Hit(idx):PlaySoundAtBall "fx_plastichit":End Sub
 Sub aGates_Hit(idx):PlaySoundAtBall "fx_gate":End Sub
 Sub aWoods_Hit(idx):PlaySoundAtBall "fx_woodhit":End Sub
 
-'**********************************************
-'    Flipper adjustments - enable tricks
-'             by JLouLouLou
-'**********************************************
+Dim Cor
+Set Cor = New CorTracker
 
-Dim FlipperPower
-Dim FlipperElasticity
-Dim SOSTorque, SOSAngle
-Dim FullStrokeEOS_Torque, LiveStrokeEOS_Torque
-Dim LeftFlipperOn
-Dim RightFlipperOn
+' Call every 10 ms for rubber dampening... which isn't implemented yet FIXME
+Class CorTracker
+    Public ballvel, ballvelx, ballvely
 
-Dim LLiveCatchTimer
-Dim RLiveCatchTimer
-Dim LiveCatchSensivity
+    Private Sub Class_Initialize()
+        ReDim ballvel(0)
+        ReDim ballvelx(0)
+        ReDim ballvely(0)
+    End Sub
 
-FlipperPower = 5000
-FlipperElasticity = 0.85
-FullStrokeEOS_Torque = 0.3  ' EOS Torque when flipper hold up ( EOS Coil is fully charged. Ampere increase due to flipper can't move or when it pushed back when "On". EOS Coil have more power )
-LiveStrokeEOS_Torque = 0.2  ' EOS Torque when flipper rotate to end ( When flipper move, EOS coil have less Ampere due to flipper can freely move. EOS Coil have less power )
+    ' Call from a ~10ms timer to track ball velocity
+    Public Sub Update()
+        Dim b, AllBalls, HighestID
+        AllBalls = GetBalls ' GetBalls = VPX API that returns Ball objects
 
-'LeftFlipper.EOSTorqueAngle = 10
-'RightFlipper.EOSTorqueAngle = 10
+        For Each b in AllBalls
+            If b.ID > HighestID then HighestID = b.ID
+        Next
 
-SOSTorque = 0.1
-SOSAngle = 6
+        If UBound(ballvel) < HighestID Then ReDim ballvel(HighestID)
+        if UBound(ballvelx) < HighestID Then ReDim ballvelx(HighestID)
+        if UBound(ballvely) < HighestID Then ReDim ballvely(HighestID)
 
-LiveCatchSensivity = 10
+        For Each b in AllBalls
+            ballvel(b.id) = BallSpeed(b)
+            ballvelx(b.id) = b.VelX
+            ballvely(b.id) = b.VelY
+        Next
+    End Sub
+End Class
 
-LLiveCatchTimer = 0
-RLiveCatchTimer = 0
+Function BallSpeed(ball)
+    BallSpeed = Sqr(ball.VelX ^ 2 + ball.VelY ^ 2 + ball.VelZ ^ 2)
+End Function
 
-' Flipper objects have built in timers
-'LeftFlipper.TimerInterval = 1
-'LeftFlipper.TimerEnabled = 1
-
-Sub LeftFlipper_Timer 'flipper's tricks timer
-'Start Of Stroke Flipper Stroke Routine : Start of Stroke for Tap pass and Tap shoot
-'    If LeftFlipper.CurrentAngle >= LeftFlipper.StartAngle - SOSAngle Then LeftFlipper.Strength = FlipperPower * SOSTorque else LeftFlipper.Strength = FlipperPower : End If
-
-'End Of Stroke Routine : Livecatch and Emply/Full-Charged EOS
-'    If LeftFlipperOn = 1 Then
-'        If LeftFlipper.CurrentAngle = LeftFlipper.EndAngle then
-'            LeftFlipper.EOSTorque = FullStrokeEOS_Torque
-'            LLiveCatchTimer = LLiveCatchTimer + 1
-'            If LLiveCatchTimer < LiveCatchSensivity Then
-'                LeftFlipper.Elasticity = 0
-'            Else
-'                LeftFlipper.Elasticity = FlipperElasticity
-'                LLiveCatchTimer = LiveCatchSensivity
-'            End If
-'        End If
-'    Else
-'        LeftFlipper.Elasticity = FlipperElasticity
-'        LeftFlipper.EOSTorque = LiveStrokeEOS_Torque
-'        LLiveCatchTimer = 0
-'    End If
-
-
-'Start Of Stroke Flipper Stroke Routine : Start of Stroke for Tap pass and Tap shoot
-'    If RightFlipper.CurrentAngle <= RightFlipper.StartAngle + SOSAngle Then RightFlipper.Strength = FlipperPower * SOSTorque else RightFlipper.Strength = FlipperPower : End If
-
-'End Of Stroke Routine : Livecatch and Emply/Full-Charged EOS
-'    If RightFlipperOn = 1 Then
-'        If RightFlipper.CurrentAngle = RightFlipper.EndAngle Then
-'            RightFlipper.EOSTorque = FullStrokeEOS_Torque
-'            RLiveCatchTimer = RLiveCatchTimer + 1
-'            If RLiveCatchTimer < LiveCatchSensivity Then
-'                RightFlipper.Elasticity = 0
-'           Else
-'                RightFlipper.Elasticity = FlipperElasticity
-'                RLiveCatchTimer = LiveCatchSensivity
-'            End If
-'        End If
-'    Else
-'        RightFlipper.Elasticity = FlipperElasticity
-'        RightFlipper.EOSTorque = LiveStrokeEOS_Torque
-'        RLiveCatchTimer = 0
-'    End If
-
-End Sub
+Function Distance(ax, ay, bx, by)
+    Distance = Sqr((ax - bx) ^ 2 + (ay - by) ^ 2)
+End Function

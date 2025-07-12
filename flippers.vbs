@@ -568,3 +568,193 @@ End Function
 Function DistancePL(px, py, ax, ay, bx, by)
     DistancePL = Abs((by - ay) * px - (bx - ax) * py + bx * ay - by * ax) / Distance(ax, ay, bx, by)
 End Function
+
+' Flipper Tricks
+'****************
+' Uses RightFlipper built in timer at 1 ms interval CAUTION!
+RightFlipper.TimerInterval = 1
+Rightflipper.TimerEnabled = True
+
+' A very fast (~1 ms) timer that updates flipper stuff
+Sub RightFlipper_timer()
+    FlipperControl.Tricks
+End Sub
+
+' Class for flipper controller
+Class hwFlipperControl
+    Private LCount, RCount, LPress, RPress, LState, RState ' Used for tricks
+    Private LEndAngle, REndAngle, LEOSNudge, REOSNudge ' Used for tricks
+    Private EOST, EOSA, FReturn, FRampUp, FElasticity ' Compensation
+    Private REFLIP_ANGLE ' For sound. Class level Const if those worked.
+
+    Private Sub Class_Initialize()
+        LCount = 0
+        RCount = 0
+        LPress = 0
+        RPress = 0
+        LState = 1
+        RState = 1
+        LEndAngle = LeftFlipper.EndAngle
+        REndAngle = RightFlipper.EndAngle
+        LEOSNudge = 0
+        REOSNudge = 0
+        REFLIP_ANGLE = 20
+
+        ' These could be constants but this lets the values be set in the
+        ' editor. It does assumes that the user is going to set both flippers
+        ' the same since it only uses the left values.
+        EOST = LeftFlipper.EOSTorque
+        EOSA = LeftFlipper.EOSTorqueAngle
+        FReturn = LeftFlipper.Return
+        FRampUp = LeftFlipper.RampUp
+        FElasticity = LeftFlipper.Elasticity
+    End Sub
+
+    Public Sub LeftCollide(parm)
+        CheckLiveCatch ActiveBall, LeftFlipper, LCount, parm
+        PlaySound "fx_rubber_flipper", Vol(ActiveBall), pan(ActiveBall), 0.2, 0, 0, 0, AudioFade(ActiveBall)
+    End Sub
+    Public Sub RightCollide(parm)
+        debug.print "RightCollide RCount=" & RCount
+        CheckLiveCatch ActiveBall, RightFlipper, RCount, parm
+        PlaySound "fx_rubber_flipper", Vol(ActiveBall), pan(ActiveBall), 0.2, 0, 0, 0, AudioFade(ActiveBall)
+    End Sub
+
+    Public Sub LeftActivate()
+        LF.Fire
+        LeftSound LeftFlipper, True
+        LPress = 1
+        LeftFlipper.Elasticity = FElasticity
+        LeftFlipper.EOSTorque = EOST
+        LeftFlipper.EOSTorqueAngle = EOSA
+    End Sub
+    Public Sub RightActivate()
+        RF.Fire
+        RightSound RightFlipper, True
+        RPress = 1
+        RightFlipper.Elasticity = FElasticity
+        RightFlipper.EOSTorque = EOST
+        RightFlipper.EOSTorqueAngle = EOSA
+    End Sub
+
+    Private Sub Deactivate(Flipper, FlipperPress)
+        Const EOS_RETURN = 0.035 ' Mid 80's to early 90's
+        'Const EOS_RETURN = 0.025 ' Mid 90's and later
+
+        FlipperPress = 0
+        Flipper.EOSTorqueAngle = EOSA
+        Flipper.EOSTorque = EOST * EOS_RETURN / FReturn
+        If Abs(Flipper.CurrentAngle) <= Abs(Flipper.EndAngle) + 0.1 Then
+            Dim b, BOT
+            BOT = GetBalls ' VPX API
+            For b = 0 to UBound(BOT)
+                If Distance(BOT(b).X, BOT(b).Y, Flipper.X, Flipper.Y) < 55 Then
+                    ' Check for cradle
+                    If BOT(b).VelY >= -0.4 Then
+                        debug.print "FlipperDeactivate Cradle Y Boost"
+                        BOT(b).VelY = -0.4
+                    End If
+                End If
+            Next
+        End If
+    End Sub
+    Public Sub LeftDeactivate()
+        LeftFlipper.RotateToStart
+        LeftSound LeftFlipper, False
+        Deactivate LeftFlipper, LPress
+    End Sub
+    Public Sub RightDeactivate()
+        RightFlipper.RotateToStart
+        RightSound RightFlipper, False
+        Deactivate RightFlipper, RPress
+    End Sub
+    Public Sub BothDeactivate()
+        LeftDeactivate
+        RightDeactivate
+    End Sub
+
+    Private Sub FlipperTricks(Flipper, FlipperPress, ByRef FCount, FEndAngle, FState)
+        Const SOS_RAMP_UP = 2.5 ' Fast. Use 6 for medium or 8.5 for slow.
+        Const EOS_RAMP_UP = 0 ' From paper
+        Const SOSEM = 0.815 ' From paper
+        Const EOSA_NEW = 1 ' From paper
+        Const EOST_NEW = 0.8 ' Possibly use 1 for machines earlier than 1990
+        Dim Dir
+        Dir = Flipper.StartAngle / Abs(Flipper.StartAngle) ' -1 for Right Flipper
+
+        If Abs(Flipper.CurrentAngle) > Abs(Flipper.StartAngle) - 0.05 Then
+            If FState <> 1 Then
+                'debug.print "FlipperTricks FState -> 1"
+                Flipper.RampUp = SOS_RAMP_UP
+                Flipper.EndAngle = FEndAngle - 3 * Dir
+                Flipper.Elasticity = FElasticity * SOSEM
+                FCount = 0
+                FState = 1
+            End If
+        ElseIf Abs(Flipper.CurrentAngle) <= Abs(Flipper.EndAngle) And FlipperPress = 1 Then
+            If FCount = 0 Then FCount = GameTime ' VPX API
+            If FState <> 2 Then
+                'debug.print "FlipperTricks FState -> 2 FCount=" & FCount
+                Flipper.EOSTorqueAngle = EOSA_NEW
+                Flipper.EOSTorque = EOST_NEW
+                Flipper.RampUp = EOS_RAMP_UP
+                Flipper.EndAngle = FEndAngle
+                FState = 2
+            End If
+        Elseif Abs(Flipper.CurrentAngle) > Abs(Flipper.EndAngle) + 0.01 And FlipperPress = 1 Then
+            If FState <> 3 Then
+                'debug.print "FlipperTricks FState -> 3"
+                Flipper.EOSTorque = EOST
+                Flipper.EOSTorqueAngle = EOSA
+                Flipper.RampUp = FRampUp
+                Flipper.Elasticity = FElasticity
+                FState = 3
+            End If
+        End If
+    End Sub
+    Public Sub Tricks()
+        FlipperTricks LeftFlipper, LPress, LCount, LEndAngle, LState
+        FlipperTricks RightFlipper, RPress, RCount, REndAngle, RState
+        FlipperNudge RightFlipper, REndAngle, REOSNudge, LeftFlipper, LEndAngle
+        FlipperNudge LeftFlipper, LEndAngle, LEOSNudge,  RightFlipper, REndAngle
+    End Sub
+
+    Private Sub LeftSound(Flipper, Enabled)
+        If Enabled Then
+            If Flipper.CurrentAngle > Flipper.EndAngle - REFLIP_ANGLE Then
+                PlaySoundAt "Flipper_ReFlip_L", Flipper
+            Else
+                PlaySoundAt "Flipper_Attack_L", Flipper
+                PlaySoundAt "Flipper_L", Flipper
+            End If
+        Else
+            If Flipper.CurrentAngle > Flipper.StartAngle + 5 Then
+                PlaySoundAt "Flipper_Down_L", Flipper
+            End If
+            'FlipperLeftHitParm = FlipperUpSoundLevel
+        End If
+    End Sub
+    Private Sub RightSound(Flipper, Enabled)
+        If Enabled Then
+            If Flipper.CurrentAngle > Flipper.EndAngle - REFLIP_ANGLE Then
+                PlaySoundAt "Flipper_ReFlip_R", Flipper
+            Else
+                PlaySoundAt "Flipper_Attack_R", Flipper
+                PlaySoundAt "Flipper_R", Flipper
+            End If
+        Else
+            If Flipper.CurrentAngle > Flipper.StartAngle + 5 Then
+                PlaySoundAt "Flipper_Down_R", Flipper
+            End If
+            'FlipperRightHitParm = FlipperUpSoundLevel
+        End If
+    End Sub
+End Class
+
+Sub RightFlipper_Collide(parm)
+    FlipperControl.RightCollide parm
+End Sub
+
+Sub LeftFlipper_Collide(parm)
+    FlipperControl.LeftCollide parm
+End Sub

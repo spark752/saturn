@@ -49,11 +49,11 @@ Sub Table1_KeyDown(ByVal Keycode)
     ' through the coil relay.
     If keycode = LeftFlipperKey Then
         swLeftFlipper_Hit
-        If Coils.bCoilPower Then FlipperControl.LeftActivate
+        If Coils.IsPowerOn Then FlipperControl.LeftActivate
     End If
     If keycode = RightFlipperKey Then
         swRightFlipper_Hit
-        If Coils.bCoilPower Then FlipperControl.RightActivate
+        If Coils.IsPowerOn Then FlipperControl.RightActivate
     End If
 
     ' Start game button. This is only handled by software.
@@ -67,7 +67,7 @@ Sub Table1_KeyUp(ByVal keycode)
     ' mad
     If keycode = PlungerKey Then
         Plunger.Fire
-        If bBallInPlungerLane Then
+        If IsInPlungerLane Then
             PlaySoundAt "fx_plunger", plunger
         Else
             PlaySoundAt "fx_plunger_empty", plunger
@@ -76,7 +76,7 @@ Sub Table1_KeyUp(ByVal keycode)
 
     ' Flippers. See KeyDown for circuit details. If the power turns off,
     ' flippers should be released anyway so KeyUp can also be ignored.
-    If Coils.bCoilPower Then
+    If Coils.IsPowerOn Then
         If keycode = LeftFlipperKey Then
             FlipperControl.LeftDeactivate
         End If
@@ -89,7 +89,7 @@ End Sub
 Sub Table1_Paused
 End Sub
 
-Sub Table1_unPaused
+Sub Table1_UnPaused
 End Sub
 
 ' *************
@@ -101,10 +101,10 @@ End Sub
 ' vertically from the other end of the trough to put it in play.
 ' The simulation uses kickers for the trough positions so that balls can
 ' be placed "uphill" from each other to get to the release point.
-' Table initialization should create a ball in each of the 4 trough
-' positions. The system may be able to function with fewer than 4 balls
-' or even with a 5th ball stored in the drain kicker.
-Class HardwareTrough
+' Initialization will create a ball in each of the 4 trough positions.
+' The system may be able to function with fewer than 4 balls or even with a 5th
+' ball stored in the drain kicker.
+Class hwTrough
     Private Sub Class_Initialize()
         Const BALL_RADIUS = 25
         Const BALL_MASS = 1
@@ -112,11 +112,6 @@ Class HardwareTrough
         Trough2.CreateSizedBallWithMass BALL_RADIUS, BALL_MASS
         Trough3.CreateSizedBallWithMass BALL_RADIUS, BALL_MASS
         Trough4.CreateSizedBallWithMass BALL_RADIUS, BALL_MASS
-        TroughTimer.Enabled = True
-    End Sub
-
-    Private Sub Class_Terminate()
-        debug.print "HardwareTrough Terminate"
     End Sub
 
     Public Sub Tick()
@@ -135,11 +130,11 @@ Class HardwareTrough
             Trough2.Kick TROUGH_KICK_ANGLE, TROUGH_KICK_SPEED
         End If
     End Sub
-End Class
 
-Sub TroughTimer_Timer()
-    Trough.Tick()
-End Sub
+    Public Sub Release()
+        Trough1.Kick 90, 4
+    End Sub
+End Class
 
 Sub Drain_Hit()
     PlaySoundAt "Drain_10", Drain ' Rolling down the trough
@@ -153,7 +148,7 @@ End Sub
 ' with four bands to switch between to show a large deflection. There is also
 ' a kicker mesh which is animated via rotation.
 '
-' The slingshots are disabled when "Tilted" so there is no reason to check
+' The slingshots are disabled when tilted so there is no reason to check
 ' that here.
 Dim LStep, RStep
 
@@ -228,18 +223,14 @@ Sub Bumper003_Hit()
     swBumper_Hit
 End Sub
 
-' *************
-'  Tilt Switch
-' *************
-Class HardwareTilt
+' ****************
+'  Tilt Mechanism
+' ****************
+Class hwTiltMech
     Private TiltValue
 
     Private Sub Class_Initialize()
         Reset
-    End Sub
-
-    Private Sub Class_Terminate()
-        debug.print "HardwareTilt Terminate"
     End Sub
 
     Public Sub Reset()
@@ -266,31 +257,31 @@ End Class
 ' **********************
 '  CPU Controlled Coils
 ' **********************
-Class HardwareCoils
-    Private mbCoilPower ' Relay for coil power to flippers, bumpers, etc.
+Class hwCoils
+    Private mIsPowerOn ' Relay for coil power to flippers, bumpers, etc.
 
     Private Sub Class_Initialize()
-        mbCoilPower = False
+        mIsPowerOn = False
     End Sub
-    Public Property Get bCoilPower()
-        bCoilPower = mbCoilPower
+    Public Property Get IsPowerOn()
+        IsPowerOn = mIsPowerOn
     End Property
-    Public Property Let bCoilPower(Enabled)
+    Public Property Let IsPowerOn(Enabled)
         Const BUMPER_ON_THRESHOLD = 1.5
         Const BUMPER_OFF_THRESHOLD = 100
 
         If Enabled Then
-            If Not mbCoilPower Then
+            If Not mIsPowerOn Then
                 PlaySound "fx_relay"
                 Bumper001.Threshold = BUMPER_ON_THRESHOLD
                 Bumper002.Threshold = BUMPER_ON_THRESHOLD
                 Bumper003.Threshold = BUMPER_ON_THRESHOLD
                 LeftSlingShot.Disabled = False
                 RightSlingShot.Disabled = False
-                mbCoilPower = True
+                mIsPowerOn = True
             End If
         Else
-            If mbCoilPower Then
+            If mIsPowerOn Then
                 PlaySound "fx_relay"
                 Bumper001.Threshold = BUMPER_OFF_THRESHOLD
                 Bumper002.Threshold = BUMPER_OFF_THRESHOLD
@@ -298,8 +289,64 @@ Class HardwareCoils
                 LeftSlingShot.Disabled = True
                 RightSlingShot.Disabled = True
                 FlipperControl.BothDeactivate
-                mbCoilPower = False
+                mIsPowerOn = False
             End If
         End If
     End Property
+End Class
+
+' *********************
+'  Non Volatile Memory
+' *********************
+Class hwNV
+    Private DEFAULT_HIGH_SCORE ' Would be class level const if those worked
+    Public HighScore ' Just one for now
+    Public GameCount ' Number of games finished
+    Public PlayTime ' Total time played in seconds
+
+    Private Sub Class_Initialize()
+        DEFAULT_HIGH_SCORE = 10000
+        Load
+    End Sub
+    Private Sub Class_Terminate()
+        Save
+    End Sub
+
+    Private Sub Load()
+        Dim x
+        x = LoadValue(TableName, "HighScore1")
+        If IsNumeric(x) Then
+            HighScore = CDbl(x)
+        Else
+            HighScore = DEFAULT_HIGH_SCORE
+        End If
+        x = LoadValue(TableName, "GameCount")
+        If IsNumeric(x) Then
+            GameCount = CDbl(x)
+        Else
+            GameCount = 0
+        End If
+        x = LoadValue(TableName, "PlayTime")
+        If IsNumeric(x) Then
+            PlayTime = CDbl(x)
+        Else
+            PlayTime = 0.0
+        End If
+    End Sub
+    Public Sub Save()
+        SaveValue TableName, "HighScore1", HighScore
+        SaveValue TableName, "GameCount", GameCount
+        SaveValue TableName, "PlayTime", PlayTime
+    End Sub
+    Public Sub Reset()
+        HighScore = DEFAULT_HIGH_SCORE
+        GameCount = 0
+        PlayTime = 0.0
+    End Sub
+
+    Public Sub EndOfGame(pScore, pPlayTime)
+        If pScore > HighScore Then HighScore = pScore
+        GameCount = GameCount + 1
+        PlayTime = PlayTime + pPlayTime
+    End Sub
 End Class

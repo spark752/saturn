@@ -32,24 +32,19 @@
 ' stuck switch would result in a blown fuse or burnt out coil, something we
 ' don't have to worry about.)
 '
-' Table Requirements (OUT OF DATE FIXME)
-'   Trough1, Trough2, Trough3 = Kickers for a 3 ball trough
-'   Drain = A kicker at the lowest point on the table to
-'   LightShootAgain = A light to indicate the ball saver state
-'   StateTimer = A 1000ms timer which is disabled in the editor
-'   DMDTimer = A 16ms timer which is enabled in the editor
-'   HardwareTimer = A 50ms timer which is disabled in the editor
-'   TroughTimer = A 200ms timer which is disabled in the editor
-'   GR1 = A trigger the detects the ball leaving the plunger lane. (A gate
-'       near the same location is required by physics.vbs so this requirement
-'       may change in the future.
-'   Plus all of the requirements listed in physics.vbs
+' GameTime = VPX global which gives an internal time in milliseconds. This is
+' probably from table start which means it is not actually a game time. It is
+' an int and should be good enough for most timing.
+' PreciseGameTime = VPX global which gives an internal time in seconds as a
+' double. More precise then GameTime but may not be available. There is no
+' mention of that in the documentation, but some versions of core.vbs check
+' for it and fall back to "GameTime / 1000.0" if not available.
 
 Option Explicit
 Randomize
 
-Const TableName = "Hack"
-Const cGameName = "Hack" ' Used by FlexDMD (and others not currently supported)
+' Name used for FlexDMD and NV (non volatile) storage of high score, etc.
+Const TableName = "Saturn"
 
 On Error Resume Next
 ExecuteGlobal GetTextFile("hardware.vbs")
@@ -66,34 +61,19 @@ Dim Credits             ' Always 1 credit per play unless in free play
 Dim Bonus               ' Bonus added at end of ball
 Dim BonusMultiplier     ' Multiplier used on bonus when it is added
 Dim BallNumber          ' 0 when game is not in play
-Dim ExtraBallsAwards    ' Increases on extra ball award, decrease when used
+Dim ExtraBallAwards     ' Increases on extra ball award, decrease when used
 Dim Score               ' Current score
 Dim ScoreMultiplier     ' Scales scoring events for different machines or modes
-Dim Tilted              ' Boolean set when machine is in tilt mode
+Dim IsTilted            ' Boolean set when machine is in tilt mode
 Dim BallsOnPlayfield    ' Allows for multiball support
-Dim bFreePlay           ' True if credits aren't needed
-Dim bGameInPlay         ' True when playing
-Dim bBallInPlungerLane  ' Mostly for selecting the right plunger sound
-Dim bBallSaverActive    ' Ball will be saved for "Shoot Again" if True
-Dim bShowShootAgain     ' Show the user that the ball has been saved
-Dim bMultiballActive    ' Multiball not just awarded but in progress
+Dim IsFreePlay          ' True if credits aren't needed
+Dim IsGameInPlay        ' True when playing
+Dim IsInPlungerLane     ' Mostly for selecting the right plunger sound
+Dim IsSaverActive       ' Ball will be saved for "Shoot Again" if True
+Dim IsMultiballActive   ' Multiball not just awarded but in progress
 Dim StateTimerState     ' Slow timer based state machine for various things
-Dim BallSaveCountdown   ' Keeps ball save active for some seconds after start
 Dim LastSwitchHit       ' String containing the switch name
-
-' Display
-Dim FlexDMD
-Const DMD_GREY_4 = 1
-Const DMD_RGB = 2
-Const ALIGN_TOP_LEFT = 0
-Const ALIGN_TOP = 1
-Const ALIGN_TOP_RIGHT = 2
-Const ALIGN_LEFT = 3
-Const ALIGN_CENTER = 4
-Const ALIGN_RIGHT = 5
-Const ALIGN_BOTTOM_LEFT = 6
-Const ALIGN_BOTTOM = 7
-Const ALIGN_BOTTOM_RIGHT = 8
+Dim GameStartTime       ' Timestamp for start of current game in milliseconds
 
 ' StateTimerState
 Const STATE_NEW_BALL = 0
@@ -114,6 +94,8 @@ Dim Trough
 Dim TiltMech
 Dim FlipperControl
 Dim Coils
+Dim NV
+Dim Display
 
 ' Flipper physics
 Dim LF ' Correction object for LeftFlipper
@@ -125,15 +107,14 @@ Dim RF ' Correction object for RightFlipper
 Sub SetTilted(Enabled)
     If Enabled Then
         debug.print "SetTilted True"
-        Tilted = True
-        bBallSaverActive = False
-        bShowShootAgain = False
-        Coils.bCoilPower = False
+        IsTilted = True
+        IsSaverActive = False
+        Coils.IsPowerOn = False
     Else
         debug.print "SetTilted False"
-        Tilted = False
+        IsTilted = False
         TiltMech.Reset
-        Coils.bCoilPower = True
+        Coils.IsPowerOn = True
     End If
 End Sub
 
@@ -145,14 +126,17 @@ End Sub
 
 ' Table events called by VPX
 Sub Table1_Init()
-    ' Init ALL of the global variables
-    bBallInPlungerLane = False
+    ' Init global variables
+    IsInPlungerLane = False
+    GameStartTime = GameTime ' GameTime = VPX API
 
     ' Custom hardware objects
-    Set Trough = New HardwareTrough
-    Set TiltMech = New HardwareTilt
-    Set FlipperControl = New HardwareFlippers
-    Set Coils = New HardwareCoils
+    Set Trough = New hwTrough
+    Set TiltMech = New hwTiltMech
+    Set FlipperControl = New hwFlipperControl
+    Set Coils = New hwCoils
+    Set NV = New hwNV
+    Set Display = New hwDisplay
 
     ' Flipper physics
     Set LF = New FlipperPolarity
@@ -164,54 +148,38 @@ Sub Table1_Init()
     StateTimer.Enabled = False
     HardwareTimer.Enabled = True
 
-    ' Display
-    Set FlexDMD = CreateObject("FlexDMD.FlexDMD")
-    If FlexDMD is Nothing Then
-        MsgBox "No FlexDMD Found"
-        Exit Sub
-    End If
-    With FlexDMD
-        .GameName = cGameName
-        .TableFile = Table1.Filename & ".vpx"
-        .Color = RGB(255, 88, 32)
-        .RenderMode = DMD_RGB
-        .Width = 128
-        .Height = 32
-        .Clear = True
-        .Run = True
-    End With
-    CreateScoreScene
-
     Software_Init
 End Sub
 
 Sub Table1_Exit()
-    If Not FlexDMD is Nothing Then
-        FlexDMD.Show = False
-        FlexDMD.Run = False
-        FlexDMD = NULL
-    End If
+    ' Delete all hardware objects to make sure their terminate methods run
+    Trough = NULL
+    TiltMech = NULL
+    FlipperControl = NULL
+    Coils = NULL
+    NV = NULL
+    Display = NULL
 End Sub
 
 ' PlungerTrigger is an invisible virtual switch located just above the plunger.
 ' It is only used to control which sound the plunger makes.
 Sub PlungerTrigger_Hit()
-    bBallInPlungerLane = True
+    IsInPlungerLane = True
 End Sub
 
 Sub PlungerTrigger_UnHit()
-    bBallInPlungerLane = False
+    IsInPlungerLane = False
 End Sub
 
 ' Immediately add to score
 Sub AddScore(Points)
-    If Tilted Then Exit Sub
+    If IsTilted Then Exit Sub
     Score = Score + Points
 End Sub
 
 ' Add to end of ball bonus score which can be effected by multipliers
 Sub AddBonus(Points)
-    If Tilted Then Exit Sub
+    If IsTilted Then Exit Sub
     Bonus = Bonus + Points
 End Sub
 
@@ -229,253 +197,11 @@ Sub swLRampMade_Hit
     AddScore 10000
 End Sub
 
-' Launch Detect via trigger near end of lane
-Sub GR1_Hit
-    If bBallSaverActive Then
-       BallSaveCountdown = BALL_SAVE_SECONDS
-       StateTimerState = STATE_SAVE_COUNTDOWN
-       StateTimer.Enabled = True
-    End If
-End Sub
-
-Dim Cor
-Set Cor = New CorTracker
-
-' FIXME: Update called every 10ms but results don't seem to be used anywhere yet
-Class CorTracker
-    Public ballvel, ballvelx, ballvely
-
-    Private Sub Class_Initialize()
-        ReDim ballvel(0)
-        ReDim ballvelx(0)
-        ReDim ballvely(0)
-    End Sub
-
-    ' Call from a ~10ms timer to track ball velocity
-    Public Sub Update()
-        Dim b, AllBalls, HighestID
-        AllBalls = GetBalls ' GetBalls = VPX API that returns Ball objects
-
-        For Each b in AllBalls
-            If b.ID > HighestID then HighestID = b.ID
-        Next
-
-        If UBound(ballvel) < HighestID Then ReDim ballvel(HighestID)
-        if UBound(ballvelx) < HighestID Then ReDim ballvelx(HighestID)
-        if UBound(ballvely) < HighestID Then ReDim ballvely(HighestID)
-
-        For Each b in AllBalls
-            ballvel(b.id) = BallSpeed(b)
-            ballvelx(b.id) = b.VelX
-            ballvely(b.id) = b.VelY
-        Next
-    End Sub
-End Class
-
-Function BallSpeed(ball)
-    BallSpeed = Sqr(ball.VelX ^ 2 + ball.VelY ^ 2 + ball.VelZ ^ 2)
-End Function
-
-Function Distance(ax, ay, bx, by)
-    Distance = Sqr((ax - bx) ^ 2 + (ay - by) ^ 2)
-End Function
-
-'****************
-' Flipper Tricks
-'****************
-' Uses RightFlipper built in timer at 1 ms interval CAUTION!
-RightFlipper.TimerInterval = 1
-Rightflipper.TimerEnabled = True
-
-' A very fast (~1 ms) timer that updates flipper stuff
-Sub RightFlipper_timer()
-    FlipperControl.Tricks
-End Sub
-
-' Class for FlipperController
-Class HardwareFlippers
-    Private LCount, RCount, LPress, RPress, LState, RState ' Used for tricks
-    Private LEndAngle, REndAngle, LEOSNudge, REOSNudge ' Used for tricks
-    Private EOST, EOSA, FReturn, FRampUp, FElasticity ' Compensation
-    Private REFLIP_ANGLE ' For sound. Class level Const if those worked.
-
-    Private Sub Class_Initialize()
-        LCount = 0
-        RCount = 0
-        LPress = 0
-        RPress = 0
-        LState = 1
-        RState = 1
-        LEndAngle = LeftFlipper.EndAngle
-        REndAngle = RightFlipper.EndAngle
-        LEOSNudge = 0
-        REOSNudge = 0
-        REFLIP_ANGLE = 20
-
-        ' These could be constants but this lets the values be set in the
-        ' editor. It does assumes that the user is going to set both flippers
-        ' the same since it only uses the left values.
-        EOST = LeftFlipper.EOSTorque
-        EOSA = LeftFlipper.EOSTorqueAngle
-        FReturn = LeftFlipper.Return
-        FRampUp = LeftFlipper.RampUp
-        FElasticity = LeftFlipper.Elasticity
-    End Sub
-
-    Public Sub LeftCollide(parm)
-        CheckLiveCatch ActiveBall, LeftFlipper, LCount, parm
-        PlaySound "fx_rubber_flipper", Vol(ActiveBall), pan(ActiveBall), 0.2, 0, 0, 0, AudioFade(ActiveBall)
-    End Sub
-    Public Sub RightCollide(parm)
-        debug.print "RightCollide RCount=" & RCount
-        CheckLiveCatch ActiveBall, RightFlipper, RCount, parm
-        PlaySound "fx_rubber_flipper", Vol(ActiveBall), pan(ActiveBall), 0.2, 0, 0, 0, AudioFade(ActiveBall)
-    End Sub
-
-    Public Sub LeftActivate()
-        LF.Fire
-        LeftSound LeftFlipper, True
-        LPress = 1
-        LeftFlipper.Elasticity = FElasticity
-        LeftFlipper.EOSTorque = EOST
-        LeftFlipper.EOSTorqueAngle = EOSA
-    End Sub
-    Public Sub RightActivate()
-        RF.Fire
-        RightSound RightFlipper, True
-        RPress = 1
-        RightFlipper.Elasticity = FElasticity
-        RightFlipper.EOSTorque = EOST
-        RightFlipper.EOSTorqueAngle = EOSA
-    End Sub
-
-    Private Sub Deactivate(Flipper, FlipperPress)
-        Const EOS_RETURN = 0.035 ' Mid 80's to early 90's
-        'Const EOS_RETURN = 0.025 ' Mid 90's and later
-
-        FlipperPress = 0
-        Flipper.EOSTorqueAngle = EOSA
-        Flipper.EOSTorque = EOST * EOS_RETURN / FReturn
-        If Abs(Flipper.CurrentAngle) <= Abs(Flipper.EndAngle) + 0.1 Then
-            Dim b, BOT
-            BOT = GetBalls ' VPX API
-            For b = 0 to UBound(BOT)
-                If Distance(BOT(b).X, BOT(b).Y, Flipper.X, Flipper.Y) < 55 Then
-                    ' Check for cradle
-                    If BOT(b).VelY >= -0.4 Then
-                        debug.print "FlipperDeactivate Cradle Y Boost"
-                        BOT(b).VelY = -0.4
-                    End If
-                End If
-            Next
-        End If
-    End Sub
-    Public Sub LeftDeactivate()
-        LeftFlipper.RotateToStart
-        LeftSound LeftFlipper, False
-        Deactivate LeftFlipper, LPress
-    End Sub
-    Public Sub RightDeactivate()
-        RightFlipper.RotateToStart
-        RightSound RightFlipper, False
-        Deactivate RightFlipper, RPress
-    End Sub
-    Public Sub BothDeactivate()
-        LeftDeactivate
-        RightDeactivate
-    End Sub
-
-    Private Sub FlipperTricks(Flipper, FlipperPress, ByRef FCount, FEndAngle, FState)
-        Const SOS_RAMP_UP = 2.5 ' Fast. Use 6 for medium or 8.5 for slow.
-        Const EOS_RAMP_UP = 0 ' From paper
-        Const SOSEM = 0.815 ' From paper
-        Const EOSA_NEW = 1 ' From paper
-        Const EOST_NEW = 0.8 ' Possibly use 1 for machines earlier than 1990
-        Dim Dir
-        Dir = Flipper.StartAngle / Abs(Flipper.StartAngle) ' -1 for Right Flipper
-
-        If Abs(Flipper.CurrentAngle) > Abs(Flipper.StartAngle) - 0.05 Then
-            If FState <> 1 Then
-                'debug.print "FlipperTricks FState -> 1"
-                Flipper.RampUp = SOS_RAMP_UP
-                Flipper.EndAngle = FEndAngle - 3 * Dir
-                Flipper.Elasticity = FElasticity * SOSEM
-                FCount = 0
-                FState = 1
-            End If
-        ElseIf Abs(Flipper.CurrentAngle) <= Abs(Flipper.EndAngle) And FlipperPress = 1 Then
-            If FCount = 0 Then FCount = GameTime ' VPX API
-            If FState <> 2 Then
-                'debug.print "FlipperTricks FState -> 2 FCount=" & FCount
-                Flipper.EOSTorqueAngle = EOSA_NEW
-                Flipper.EOSTorque = EOST_NEW
-                Flipper.RampUp = EOS_RAMP_UP
-                Flipper.EndAngle = FEndAngle
-                FState = 2
-            End If
-        Elseif Abs(Flipper.CurrentAngle) > Abs(Flipper.EndAngle) + 0.01 And FlipperPress = 1 Then
-            If FState <> 3 Then
-                'debug.print "FlipperTricks FState -> 3"
-                Flipper.EOSTorque = EOST
-                Flipper.EOSTorqueAngle = EOSA
-                Flipper.RampUp = FRampUp
-                Flipper.Elasticity = FElasticity
-                FState = 3
-            End If
-        End If
-    End Sub
-    Public Sub Tricks()
-        FlipperTricks LeftFlipper, LPress, LCount, LEndAngle, LState
-        FlipperTricks RightFlipper, RPress, RCount, REndAngle, RState
-        FlipperNudge RightFlipper, REndAngle, REOSNudge, LeftFlipper, LEndAngle
-        FlipperNudge LeftFlipper, LEndAngle, LEOSNudge,  RightFlipper, REndAngle
-    End Sub
-
-    Private Sub LeftSound(Flipper, Enabled)
-        If Enabled Then
-            If Flipper.CurrentAngle > Flipper.EndAngle - REFLIP_ANGLE Then
-                PlaySoundAt "Flipper_ReFlip_L", Flipper
-            Else
-                PlaySoundAt "Flipper_Attack_L", Flipper
-                PlaySoundAt "Flipper_L", Flipper
-            End If
-        Else
-            If Flipper.CurrentAngle > Flipper.StartAngle + 5 Then
-                PlaySoundAt "Flipper_Down_L", Flipper
-            End If
-            'FlipperLeftHitParm = FlipperUpSoundLevel
-        End If
-    End Sub
-    Private Sub RightSound(Flipper, Enabled)
-        If Enabled Then
-            If Flipper.CurrentAngle > Flipper.EndAngle - REFLIP_ANGLE Then
-                PlaySoundAt "Flipper_ReFlip_R", Flipper
-            Else
-                PlaySoundAt "Flipper_Attack_R", Flipper
-                PlaySoundAt "Flipper_R", Flipper
-            End If
-        Else
-            If Flipper.CurrentAngle > Flipper.StartAngle + 5 Then
-                PlaySoundAt "Flipper_Down_R", Flipper
-            End If
-            'FlipperRightHitParm = FlipperUpSoundLevel
-        End If
-    End Sub
-End Class
-
-Sub RightFlipper_Collide(parm)
-    FlipperControl.RightCollide parm
-End Sub
-
-Sub LeftFlipper_Collide(parm)
-    FlipperControl.LeftCollide parm
-End Sub
-
 ' Start button
 Sub swStart_Hit()
-    debug.print "swStart_Hit " & BallsOnPlayfield & " " & bGameInPlay
-    If BallsOnPlayfield < 1 And Not bGameInPlay Then
-        If bFreePlay Then
+    debug.print "swStart_Hit " & BallsOnPlayfield & " " & IsGameInPlay
+    If BallsOnPlayfield < 1 And Not IsGameInPlay Then
+        If IsFreePlay Then
             StartGame
         ElseIf Credits > 0 Then
             Credits = Credits - 1
@@ -486,7 +212,8 @@ End Sub
 
 ' Coin accepted switch
 Sub swCredit_Hit()
-    If Not bFreePlay Then AddCredits 1
+    If Not IsFreePlay Then AddCredits 1
+    Display.CoinIn
 End Sub
 
 ' Flipper buttons. Hardware drives the flippers so these can be used for
@@ -525,10 +252,10 @@ Sub swDrain_Hit()
     debug.print "swDrain_Hit"
     LastSwitchHit = "Drain"
     BallsOnPlayfield = BallsOnPlayfield - 1
-    If bGameInPLay Then
+    If IsGameInPlay Then
         If BallsOnPlayfield < 1 Then
-            'If bBallSaverActive Then
-            '   bBallSaverActive = False
+            'If IsSaverActive Then
+            '   IsSaverActive = False
             '    StateTimerState = STATE_SHOOT_AGAIN
             '    StateTimer.Enabled = True
             'Else
@@ -536,7 +263,7 @@ Sub swDrain_Hit()
                 StateTimer.Enabled = True
             'End If
         ElseIf BallsOnPlayfield = 1 Then
-            bMultiballActive = False
+            IsMultiballActive = False
         End If
     End If
 End Sub
@@ -547,17 +274,18 @@ Sub Software_Init()
     Bonus = 0
     BonusMultiplier = 1
     BallNumber = 0
-    ExtraBallsAwards = 0
+    ExtraBallAwards = 0
     Score = 0
     ScoreMultiplier = 1
     BallsOnPlayfield = 0
-    bGameInPlay = False
-    bBallSaverActive = False
-    bShowShootAgain = False
-    bMultiballActive = False
+    IsGameInPlay = False
+    IsSaverActive = False
+    IsMultiballActive = False
     StateTimerState = STATE_NEW_BALL
-    BallSaveCountdown = 15
     LastSwitchHit = ""
+    Display.SetText "SYSTEM", "RESET"
+    Display.SetScene DISP_TWO_ROWS
+    Display.AttractMode True
 End Sub
 
 Sub StartGame()
@@ -566,13 +294,15 @@ Sub StartGame()
     ' Only game start things need to be set here since the others will be
     ' set by ResetForNewBall
     Score = 0
-    bGameInPlay = True
+    IsGameInPlay = True
     BallsOnPlayfield = 0
     TiltMech.Reset
-    SetTilted False ' Resets tilt mech and turns on bCoilPower
+    SetTilted False ' Resets tilt mech and turns on IsPowerOn
     Game_Init() ' Table specific hook
-
+    GameStartTime = GameTime ' GameTime = VPX API
     BallNumber = 1
+    Display.SetScene DISP_SCOREBOARD
+    Display.AttractMode False
     StateTimerState = STATE_NEW_BALL
     StateTimer.Interval = 500
     StateTimer.Enabled = True
@@ -582,10 +312,10 @@ Sub ResetForNewBall()
     debug.print "ResetForNewBall"
     Bonus = 0
     BonusMultiplier = 1
-    ExtraBallsAwards = 0
+    ExtraBallAwards = 0
     BallsOnPlayfield = 0
-    bBallInPlungerLane = False
-    bBallSaverActive = False
+    IsInPlungerLane = False
+    IsSaverActive = False
 End Sub
 
 ' Slow timer that is used for some basic state machine things
@@ -598,16 +328,15 @@ Sub StateTimer_Timer()
 
         Case STATE_BALL_RELEASE
             debug.print "STATE_BALL_RELEASE"
-            Trough1.Kick 90, 4
+            Trough.Release
             PlaySoundAt "fx_Ballrel", Plunger
-            bShowShootAgain = False
             StateTimer.Enabled = False
             ' Timer will be restarted once a switch detects the ball in
             ' the playfield
 
         Case STATE_END_OF_BALL
             debug.print "STATE_END_OF_BALL"
-            If Not Tilted Then
+            If Not IsTilted Then
                 ' Add bonus here with countup, animation, etc. in the future
                 AddScore Bonus * BonusMultiplier
             End If
@@ -615,11 +344,11 @@ Sub StateTimer_Timer()
 
         Case STATE_BALL_OVER
             debug.print "STATE_BALL_OVER"
-            If Tilted Then
+            If IsTilted Then
                 SetTilted False
             End If
-            If ExtraBallsAwards > 0 Then
-                ExtraBallsAwards = ExtraBallsAwards - 1 ' Same ball number
+            If ExtraBallAwards > 0 Then
+                ExtraBallAwards = ExtraBallAwards - 1 ' Same ball number
             Else
                 BallNumber = BallNumber + 1
             End If
@@ -632,13 +361,32 @@ Sub StateTimer_Timer()
 
         Case STATE_GAME_OVER
             debug.print "STATE_GAME_OVER"
-            bGameInPlay = False
-            Coils.bCoilPower = False
-            'TextBall.Text = "GAME OVER"
+            IsGameInPlay = False
+            Coils.IsPowerOn = False
+            NV.EndOfGame Score, ((GameTime - GameStartTime) * 0.001)
+            Display.AttractMode True
             StateTimer.Enabled = False
 
         Case Else
             debug.print "StateTimer unknown state"
             StateTimer.Enabled = False
     End Select
+End Sub
+
+' Main 10 ms timer
+Dim TickCount
+TickCount = 0
+HardwareTimer.Enabled = True
+Sub HardwareTimer_Timer()
+    TickCount = TickCount + 1
+
+    ' 10 ms
+    Rolling_Tick
+    Physics_Tick
+
+    ' 20 ms on even tick
+    If TickCount Mod 2 = 0 Then Display.Tick
+
+    ' 200 ms on odd tick
+    If TickCount Mod 20 = 1 Then Trough.Tick
 End Sub
